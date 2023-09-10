@@ -1,0 +1,116 @@
+ads = audioDatastore("C:\Users\jason\Desktop\Personal_Projects\Speech_Recognition\MATLAB_MFCC_HMM\audio_1","IncludeSubfolders",'1');
+ads = audioDatastore("C:\Users\jason\Desktop\Personal_Projects\Speech_Recognition\MATLAB_MFCC_HMM\audio_2","IncludeSubfolders",'2');
+ads = audioDatastore("C:\Users\jason\Desktop\Personal_Projects\Speech_Recognition\MATLAB_MFCC_HMM\audio_3","IncludeSubfolders",'3');
+ads = audioDatastore("C:\Users\jason\Desktop\Personal_Projects\Speech_Recognition\MATLAB_MFCC_HMM\audio_4","IncludeSubfolders",'4');
+ads = audioDatastore("C:\Users\jason\Desktop\Personal_Projects\Speech_Recognition\MATLAB_MFCC_HMM\audio_5","IncludeSubfolders",'5');
+ads = audioDatastore("C:\Users\jason\Desktop\Personal_Projects\Speech_Recognition\MATLAB_MFCC_HMM\audio_6","IncludeSubfolders",'6');
+ads = audioDatastore("C:\Users\jason\Desktop\Personal_Projects\Speech_Recognition\MATLAB_MFCC_HMM\audio_7","IncludeSubfolders",'7');
+
+[adsTrain,adsTest] = splitEachLabel(ads,0.8);
+
+fs = dsInfo.SampleRate;
+windowLength = round(0.03*fs);
+overlapLength = round(0.025*fs);
+afe = audioFeatureExtractor(SampleRate=fs, ...
+    Window=hamming(windowLength,"periodic"),OverlapLength=overlapLength, ...
+    zerocrossrate=true,shortTimeEnergy=true,pitch=true,mfcc=true);
+
+
+features = [];
+labels = [];
+energyThreshold = 0.005;
+zcrThreshold = 0.2;
+
+keepLen = round(length(sampleTrain)/3);
+
+while hasdata(adsTrain)
+    [audioIn,dsInfo] = read(adsTrain);
+
+    % Take the first portion of each recording to speed up code
+    audioIn = audioIn(1:keepLen);
+
+    feat = extract(afe,audioIn);
+    isSpeech = feat(:,featureMap.shortTimeEnergy) > energyThreshold;
+    isVoiced = feat(:,featureMap.zerocrossrate) < zcrThreshold;
+
+    voicedSpeech = isSpeech & isVoiced;
+
+    feat(~voicedSpeech,:) = [];
+    feat(:,[featureMap.zerocrossrate,featureMap.shortTimeEnergy]) = [];
+    label = repelem(dsInfo.Label,size(feat,1));
+    
+    features = [features;feat];
+    labels = [labels,label];
+end
+
+M = mean(features,1);
+S = std(features,[],1);
+features = (features-M)./S;
+
+
+trainedClassifier = fitcknn(features,labels, ...
+    Distance="euclidean", ...
+    NumNeighbors=5, ...
+    DistanceWeight="squaredinverse", ...
+    Standardize=false, ...
+    ClassNames=unique(labels));
+
+k = 5;
+group = labels;
+c = cvpartition(group,KFold=k); % 5-fold stratified cross validation
+partitionedModel = crossval(trainedClassifier,CVPartition=c);
+
+validationAccuracy = 1 - kfoldLoss(partitionedModel,LossFun="ClassifError");
+fprintf('\nValidation accuracy = %.2f%%\n', validationAccuracy*100);
+
+
+validationPredictions = kfoldPredict(partitionedModel);
+figure(Units="normalized",Position=[0.4 0.4 0.4 0.4])
+confusionchart(labels,validationPredictions,title="Validation Accuracy", ...
+    ColumnSummary="column-normalized",RowSummary="row-normalized");
+
+features = [];
+labels = [];
+numVectorsPerFile = [];
+while hasdata(adsTest)
+    [audioIn,dsInfo] = read(adsTest);
+    
+    % Take the same first portion of each recording to speed up code
+    audioIn = audioIn(1:keepLen);
+
+    feat = extract(afe,audioIn);
+
+    isSpeech = feat(:,featureMap.shortTimeEnergy) > energyThreshold;
+    isVoiced = feat(:,featureMap.zerocrossrate) < zcrThreshold;
+
+    voicedSpeech = isSpeech & isVoiced;
+
+    feat(~voicedSpeech,:) = [];
+    numVec = size(feat,1);
+    feat(:,[featureMap.zerocrossrate,featureMap.shortTimeEnergy]) = [];
+    
+    label = repelem(dsInfo.Label,numVec);
+    
+    numVectorsPerFile = [numVectorsPerFile,numVec];
+    features = [features;feat];
+    labels = [labels,label];
+end
+features = (features-M)./S;
+
+prediction = predict(trainedClassifier,features);
+prediction = categorical(string(prediction));
+
+figure(Units="normalized",Position=[0.4 0.4 0.4 0.4])
+confusionchart(labels(:),prediction,title="Test Accuracy (Per Frame)", ...
+    ColumnSummary="column-normalized",RowSummary="row-normalized");
+
+r2 = prediction(1:numel(adsTest.Files));
+idx = 1;
+for ii = 1:numel(adsTest.Files)
+    r2(ii) = mode(prediction(idx:idx+numVectorsPerFile(ii)-1));
+    idx = idx + numVectorsPerFile(ii);
+end
+
+figure(Units="normalized",Position=[0.4 0.4 0.4 0.4])
+confusionchart(adsTest.Labels,r2,title="Test Accuracy (Per File)", ...
+    ColumnSummary="column-normalized",RowSummary="row-normalized");
